@@ -47,6 +47,10 @@
     background:#fff;font-size:16px;color:var(--ink);
   }
   input:focus{outline:2px solid var(--gold);border-color:var(--gold);}
+  select{width:100%;padding:11px 12px;border-radius:10px;border:1.5px solid var(--line);
+    background:#fff;font-size:16px;color:var(--ink);}
+  select:focus{outline:2px solid var(--gold);border-color:var(--gold);}
+  .hint{font-size:12.5px;color:#5b6577;margin:0 0 4px;}
   .btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;
     border:none;border-radius:12px;padding:12px 16px;font-size:14.5px;font-weight:600;
     cursor:pointer;width:100%;margin-top:12px;transition:transform .1s ease, opacity .15s ease;}
@@ -288,7 +292,7 @@ html,body{background:#FFF1BF !important;color:#4A3606 !important;}
   </div>
 </div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js" async crossorigin="anonymous"></script>
 <script>
 /* ================= Supabase (shared/multiplayer storage) =================
    Plain REST calls (no library needed). Table: public.ipon_kv (key, value).
@@ -385,7 +389,12 @@ window.addEventListener('unhandledrejection', (e) => {
 });
 window.addEventListener('error', (e) => {
   console.error('Script error:', e.error || e.message);
-  showErrBanner('Error: ' + (e.error && e.error.message ? e.error.message : e.message));
+  // Browsers report errors from other origins (in-app browsers like Messenger/Facebook,
+  // extensions, CDN scripts) as a bare "Script error." with no file, line or Error object.
+  // That is not a bug in this app and nothing here is broken, so don't show the red banner.
+  const msg = (e && e.message) || '';
+  if (!e.error && (!e.filename || /^script error\.?$/i.test(msg))) return;
+  showErrBanner('Error: ' + (e.error && e.error.message ? e.error.message : msg));
 });
 function uid(n){
   const chars='ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -395,7 +404,7 @@ function uid(n){
 function peso(n){ return '₱' + Number(n||0).toLocaleString(); }
 function initials(name){
   const parts = (name||'?').trim().split(/\s+/);
-  return ((parts[0]?.[0]||'') + (parts.length>1 ? parts[parts.length-1][0] : '')).toUpperCase() || '?';
+  return (((parts[0] && parts[0][0])||'') + (parts.length>1 ? parts[parts.length-1][0] : '')).toUpperCase() || '?';
 }
 function avatarHtml(member, extraClass){
   const cls = 'lb-avatar' + (extraClass ? ' ' + extraClass : '');
@@ -580,7 +589,7 @@ async function joinGroup(code, name, existingMemberId){
 
   if (!members[memberId]){
     members[memberId] = { name, joinedAt: Date.now() };
-    await sset(keyMembers(code), members, true);
+    await sset(keyMembers(code), stripAvatars(members), true);
   }
   state.me = { memberId, name: members[memberId].name, isAdmin };
   await sset(keyMine(code), state.me, false);
@@ -712,32 +721,8 @@ async function onEnvClick(i){
   if (box.status === 'empty'){
     if (state.meta.status === 'ended'){ toast('Challenge has ended.'); return; }
     if (state.meta.locked){ toast('Challenge is locked — ask an admin to unlock it.'); return; }
-    const input = document.createElement('input');
-    input.type = 'file'; input.accept = 'image/*';
-    // Some mobile browsers/in-app webviews don't reliably fire `change` on a
-    // file input that was never attached to the document — attach it (hidden,
-    // via the existing input[type=file] CSS rule) and remove it once we're done.
-    document.body.appendChild(input);
-    input.onchange = async () => {
-      try {
-        const file = input.files[0];
-        if (!file) return;
-        toast('Uploading receipt…');
-        const dataUrl = await compressImage(file, 500, 0.55);
-        const boxes = await sget(keyBoxes(state.code), true) || state.boxes;
-        boxes[i] = { status:'pending', ownerId: state.me.memberId, amount: boxes[i].amount, receipt:null, ts: Date.now() };
-        const savedPhoto = await sset(keyBoxReceipt(state.code, i), dataUrl, true);
-        if (!savedPhoto){ toast('⚠️ Could not save receipt — try again'); return; }
-        await sset(keyBoxes(state.code), boxes, true);
-        boxes[i].receipt = dataUrl;
-        state.boxes = boxes;
-        toast('Receipt submitted — waiting for admin approval');
-        render();
-      } finally {
-        input.remove();
-      }
-    };
-    input.click();
+    if (state.me.isAdmin){ openBehalfModal([i]); return; }
+    pickPhoto(file => uploadReceipt([i], file));
     return;
   }
   if (box.status === 'pending'){
@@ -772,35 +757,9 @@ function toggleSelectBox(i){
 async function submitSelectedBoxes(){
   if (state.meta.status === 'ended'){ toast('Challenge has ended.'); return; }
   if (!state.selected.length){ toast('Select at least one box first'); return; }
-  const input = document.createElement('input');
-  input.type = 'file'; input.accept = 'image/*';
-  document.body.appendChild(input);
-  input.onchange = async () => {
-    try {
-      const file = input.files[0];
-      if (!file) return;
-      const count = state.selected.length;
-      toast('Uploading receipt…');
-      const dataUrl = await compressImage(file, 500, 0.55);
-      const boxes = await sget(keyBoxes(state.code), true) || state.boxes;
-      const ts = Date.now();
-      const targets = state.selected.filter(i => boxes[i] && boxes[i].status === 'empty');
-      const savedAll = await Promise.all(targets.map(i => sset(keyBoxReceipt(state.code, i), dataUrl, true)));
-      if (savedAll.some(ok => !ok)){ toast('⚠️ Some receipts could not be saved'); return; }
-      targets.forEach(i => {
-        boxes[i] = { status:'pending', ownerId: state.me.memberId, amount: boxes[i].amount, receipt:dataUrl, ts };
-      });
-      await sset(keyBoxes(state.code), boxes, true);
-      state.boxes = boxes;
-      state.selectMode = false;
-      state.selected = [];
-      toast('One receipt submitted for ' + count + ' box(es) — waiting for admin approval');
-      render();
-    } finally {
-      input.remove();
-    }
-  };
-  input.click();
+  const picked = state.selected.slice();
+  if (state.me.isAdmin){ openBehalfModal(picked); return; }
+  pickPhoto(file => uploadReceipt(picked, file));
 }
 
 async function approveBox(i){
@@ -1038,6 +997,177 @@ async function endChallenge(){
     toast('Challenge ended 🎉');
     render();
   });
+}
+
+/* ================= uploads (shared by members and admins) ================= */
+function esc(s){
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function normName(v){ return String(v||'').trim().replace(/\s+/g,' ').toLowerCase(); }
+// avatars live under their own storage keys — never copy them into the shared members record
+function stripAvatars(members){
+  const clean = {};
+  Object.keys(members).forEach(id => { const m = Object.assign({}, members[id]); delete m.avatar; clean[id] = m; });
+  return clean;
+}
+
+// Opens the phone's photo picker. The <input> is attached to <body> (not #app) so the
+// 5-second live refresh can't remove it while the gallery is open.
+let activePicker = null;
+function pickPhoto(onFile){
+  if (activePicker){ activePicker.remove(); activePicker = null; }
+  const input = document.createElement('input');
+  input.type = 'file'; input.accept = 'image/*';
+  document.body.appendChild(input);
+  activePicker = input;
+  input.onchange = async () => {
+    try {
+      const file = input.files[0];
+      if (!file) return;
+      await onFile(file);
+    } finally {
+      input.remove();
+      if (activePicker === input) activePicker = null;
+    }
+  };
+  input.click();
+}
+
+// Finds (or creates) the member an admin is uploading for.
+async function resolveOwner(who){
+  if (!who.newName) return who.ownerId || state.me.memberId;
+  const members = await sget(keyMembers(state.code), true) || {};
+  const wanted = normName(who.newName);
+  let id = Object.keys(members).find(k => normName(members[k].name) === wanted);
+  if (!id){
+    id = 'm_' + uid(6);
+    members[id] = { name: who.newName.trim(), joinedAt: Date.now(), addedByAdmin: true };
+    const ok = await sset(keyMembers(state.code), stripAvatars(members), true);
+    if (!ok) throw new Error('Could not add that person — please try again.');
+  }
+  if (!state.members) state.members = {};
+  if (!state.members[id]) state.members[id] = { name: members[id].name };
+  return id;
+}
+
+// who (admins only): { ownerId | newName, autoApprove }
+async function uploadReceipt(indexes, file, who){
+  if (state.meta.status === 'ended'){ toast('Challenge has ended.'); return; }
+  toast('Uploading receipt…');
+  const dataUrl = await compressImage(file, 500, 0.55);
+  const onBehalf = !!(who && state.me.isAdmin);
+  const ownerId = onBehalf ? await resolveOwner(who) : state.me.memberId;
+  const approveNow = onBehalf && !!who.autoApprove;
+
+  const boxes = await sget(keyBoxes(state.code), true) || state.boxes;
+  const targets = indexes.filter(i => boxes[i] && boxes[i].status === 'empty');
+  if (!targets.length){ toast('Those boxes were just taken — please pick again.'); return; }
+
+  // each receipt photo is stored under its own key; the shared boxes record stays small
+  const savedAll = await Promise.all(targets.map(i => sset(keyBoxReceipt(state.code, i), dataUrl, true)));
+  if (savedAll.some(ok => !ok)){ toast('⚠️ Could not save receipt — try again'); return; }
+  const ts = Date.now();
+  targets.forEach(i => {
+    boxes[i] = { status: approveNow ? 'approved' : 'pending', ownerId, amount: boxes[i].amount, receipt: null, ts };
+  });
+  const ok = await sset(keyBoxes(state.code), boxes, true);
+  if (!ok){ toast('⚠️ Could not save — try again'); return; }
+
+  // keep receipt photos already on screen, then attach the new one
+  boxes.forEach((b, i) => {
+    const old = state.boxes && state.boxes[i];
+    if (!b.receipt && old && old.receipt && b.status !== 'empty') b.receipt = old.receipt;
+  });
+  targets.forEach(i => { boxes[i].receipt = dataUrl; });
+  state.boxes = boxes;
+  state.selectMode = false; state.selected = [];
+
+  const ownerName = (state.members && state.members[ownerId]) ? state.members[ownerId].name : 'member';
+  const many = targets.length > 1;
+  if (approveNow){
+    if (ownerId !== state.me.memberId){
+      for (const i of targets) await pushNotification(ownerId, i, boxes[i].amount);
+    }
+    toast('✅ Saved & approved for ' + ownerName + (many ? ' (' + targets.length + ' boxes)' : ''));
+    if (savedTotal() >= Number(state.meta.goal||0)){
+      setTimeout(() => toast('Goal reached 🎉 — admin can now end the challenge.'), 2400);
+    }
+  } else if (onBehalf){
+    toast('Receipt submitted for ' + ownerName + ' — pending approval');
+  } else if (many){
+    toast('One receipt submitted for ' + targets.length + ' box(es) — waiting for admin approval');
+  } else {
+    toast('Receipt submitted — waiting for admin approval');
+  }
+  render();
+}
+
+// Admin: choose which team member the receipt is for (or add someone new), then pick the photo.
+function openBehalfModal(indexes){
+  const members = state.members || {};
+  const meId = state.me.memberId;
+  const ids = Object.keys(members).sort((a, b) => String(members[a].name).localeCompare(String(members[b].name)));
+  const total = indexes.reduce((s, i) => s + Number((state.boxes[i] || {}).amount || 0), 0);
+  const label = indexes.length === 1 ? 'Box #' + (indexes[0] + 1) : indexes.length + ' boxes';
+
+  const backdrop = document.createElement('div');
+  backdrop.className = 'modal-backdrop';
+  backdrop.innerHTML = `
+    <div class="modal-sheet">
+      <button class="modal-close" id="obClose">✕</button>
+      <h3>Upload for a team member</h3>
+      <p class="hint">${label} · ${peso(total)}</p>
+
+      <label>Upload for</label>
+      <select id="obMember">
+        ${ids.map(id => `<option value="${esc(id)}" ${id === meId ? 'selected' : ''}>${esc(members[id].name)}${id === meId ? ' (me)' : ''}</option>`).join('')}
+        <option value="__new__">➕ Someone new…</option>
+      </select>
+      <div id="obNewWrap" class="hidden">
+        <label>Their name</label>
+        <input id="obNewName" type="text" placeholder="e.g. Maria">
+        <p class="hint" style="margin-top:6px;">If they join later with this name, these boxes will already be theirs.</p>
+      </div>
+
+      <div class="toggle-row">
+        <span>✅ Approve right away</span>
+        <div class="switch on" id="obApprove"><div class="dot"></div></div>
+      </div>
+      <p class="hint">Turn off to review the receipt first.</p>
+
+      <button class="btn btn-primary" id="obChoose">📷 Choose photo</button>
+      <button class="btn btn-outline btn-small" id="obCancel" style="width:100%;margin-top:8px;">Cancel</button>
+    </div>`;
+  document.body.appendChild(backdrop);
+
+  const sel = backdrop.querySelector('#obMember');
+  const newWrap = backdrop.querySelector('#obNewWrap');
+  const newName = backdrop.querySelector('#obNewName');
+  const approve = backdrop.querySelector('#obApprove');
+  if (!sel.value || (meId && !members[meId])) sel.selectedIndex = 0;
+
+  sel.onchange = () => {
+    const isNew = sel.value === '__new__';
+    newWrap.classList.toggle('hidden', !isNew);
+    if (isNew) newName.focus();
+  };
+  approve.onclick = () => approve.classList.toggle('on');
+  backdrop.querySelector('#obClose').onclick = () => backdrop.remove();
+  backdrop.querySelector('#obCancel').onclick = () => backdrop.remove();
+  backdrop.onclick = (e) => { if (e.target === backdrop) backdrop.remove(); };
+
+  backdrop.querySelector('#obChoose').onclick = () => {
+    const who = { autoApprove: approve.classList.contains('on') };
+    if (sel.value === '__new__'){
+      const n = newName.value.trim();
+      if (!n){ toast('Enter their name first'); newName.focus(); return; }
+      who.newName = n;
+    } else {
+      who.ownerId = sel.value;
+    }
+    backdrop.remove();
+    pickPhoto(file => uploadReceipt(indexes, file, who));   // runs inside this tap, so the picker is allowed to open
+  };
 }
 
 /* ================= derived data ================= */
@@ -1345,7 +1475,6 @@ function renderChallenge(){
         ${avatarHtml(state.members && state.members[state.me.memberId])}
       </div>
       <span>Hi, <b>${state.me.name}</b>${state.me.isAdmin ? ' <span class="admin-badge">ADMIN</span>' : ''}</span>
-      <input type="file" id="myAvatarInput" accept="image/*">
     </div>
   </div>
   <img src="${BELIGHTS_BANNER}" alt="Belights Official" style="width:100%;display:block;">
@@ -1379,7 +1508,7 @@ function renderChallenge(){
 
   <div class="section-card">
     <div class="section-title">Envelope grid</div>
-    <p class="grid-hint">${state.meta.status === 'ended' ? 'This challenge has ended. New receipts are closed, but admins can still manage settings and boxes.' : state.selectMode ? 'Tap open boxes to select them, then upload one receipt to cover all of them.' : 'Tap an open box, upload your receipt, and wait for admin approval.'}</p>
+    <p class="grid-hint">${state.meta.status === 'ended' ? 'This challenge has ended. New receipts are closed, but admins can still manage settings and boxes.' : state.selectMode ? 'Tap open boxes to select them, then upload one receipt to cover all of them.' : (state.me.isAdmin ? 'Tap an open box to upload a receipt — you can choose which team member it’s for.' : 'Tap an open box, upload your receipt, and wait for admin approval.')}</p>
     <div class="env-grid">${gridCells}</div>
     ${state.selectMode ? `
     <div class="select-bar">
@@ -1408,13 +1537,8 @@ function bindChallenge(){
     });
   };
   const avatarWrap = document.getElementById('myAvatarWrap');
-  const avatarInput = document.getElementById('myAvatarInput');
-  if (avatarWrap && avatarInput){
-    avatarWrap.onclick = () => avatarInput.click();
-    avatarInput.onchange = async () => {
-      const file = avatarInput.files[0];
-      if (file) await uploadMyAvatar(file);
-    };
+  if (avatarWrap){
+    avatarWrap.onclick = () => pickPhoto(uploadMyAvatar);
   }
   document.querySelectorAll('.env').forEach(el => {
     el.onclick = () => {
