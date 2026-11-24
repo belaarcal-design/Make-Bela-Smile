@@ -1195,6 +1195,74 @@ async function fitAmountsToGoal(){
   return true;
 }
 
+function gcd2(a,b){ return b ? gcd2(b, a % b) : a; }
+
+// Picks `count` amounts from `denoms` that add up to exactly `target` (or returns null if impossible).
+// Uses a small table of reachable sums, then builds the list at random so the mix looks natural.
+function assignDenominations(count, target, denoms){
+  const g = denoms.reduce(gcd2);
+  if (target % g !== 0) return null;
+  const T = target / g, ds = denoms.map(d => d / g);
+  if ((count + 1) * (T + 1) > 6000000) return 'toolarge';
+  const reach = [];
+  for (let k = 0; k <= count; k++) reach.push(new Uint8Array(T + 1));
+  reach[0][0] = 1;
+  for (let k = 1; k <= count; k++){
+    for (let s = 0; s <= T; s++){
+      for (let j = 0; j < ds.length; j++){
+        if (s >= ds[j] && reach[k-1][s - ds[j]]){ reach[k][s] = 1; break; }
+      }
+    }
+  }
+  if (!reach[count][T]) return null;
+  const out = [];
+  let t = T;
+  for (let n = count; n >= 1; n--){
+    const avg = t / n;
+    const options = ds.filter(d => t >= d && reach[n-1][t - d]);
+    // lean toward bills near the average still needed, but keep every bill possible
+    const w = options.map(d => 1 / (1 + 0.5 * Math.pow(Math.log(d / avg), 2)));
+    let r = Math.random() * w.reduce((a,b) => a + b, 0), pick = options[options.length - 1];
+    for (let i = 0; i < options.length; i++){ r -= w[i]; if (r <= 0){ pick = options[i]; break; } }
+    out.push(pick * g);
+    t -= pick;
+  }
+  for (let i = out.length - 1; i > 0; i--){           // shuffle positions
+    const j = Math.floor(Math.random() * (i + 1));
+    const tmp = out[i]; out[i] = out[j]; out[j] = tmp;
+  }
+  return out;
+}
+
+async function assignBills(text){
+  if (!state.me.isAdmin){ toast('Only admins can change box amounts'); return false; }
+  const denoms = Array.from(new Set(String(text||'').split(/[\s,;]+/).map(Number).filter(n => n > 0 && Math.floor(n) === n))).sort((a,b) => a - b);
+  if (!denoms.length){ toast('Enter bills like 10, 20, 50, 100, 200, 1000'); return false; }
+  const boxes = await sget(keyBoxes(state.code), true) || state.boxes;
+  const goal = Number(state.meta.goal||0);
+  const empties = boxes.map((b,i) => i).filter(i => boxes[i].status === 'empty');
+  const taken = boxes.reduce((s,b) => s + (b.status === 'empty' ? 0 : Number(b.amount||0)), 0);
+  const target = goal - taken;
+  if (!empties.length){ toast('No empty boxes left to adjust.'); return false; }
+  if (target <= 0){ toast('Saved/pending boxes already cover the goal.'); return false; }
+  const result = assignDenominations(empties.length, target, denoms);
+  if (result === 'toolarge'){ toast('Goal is too large for this — use bigger bills.'); return false; }
+  if (!result){
+    toast('Can’t make ' + peso(target) + ' from ' + empties.length + ' boxes with those bills (possible range ' +
+      peso(empties.length * denoms[0]) + '–' + peso(empties.length * denoms[denoms.length-1]) + '). Change the number of boxes or bills.');
+    return false;
+  }
+  empties.forEach((i, n) => { boxes[i].amount = result[n]; });
+  const ok = await sset(keyBoxes(state.code), boxes, true);
+  if (!ok){ toast('⚠️ Could not save — try again'); return false; }
+  state.boxes = boxes;
+  const counts = {};
+  result.forEach(a => { counts[a] = (counts[a]||0) + 1; });
+  toast('Done — total ' + peso(boxesTotal()) + ' · ' + Object.keys(counts).map(Number).sort((a,b)=>b-a).map(a => '₱' + a + '×' + counts[a]).join(', '));
+  render();
+  return true;
+}
+
 /* ================= derived data ================= */
 function progressPct(){
   const approvedSum = (state.boxes||[]).filter(b=>b.status==='approved')
@@ -1794,6 +1862,11 @@ function openSettings(){
       <button class="btn btn-primary" id="fitGoalBtn" style="margin-top:6px;" ${meta.locked?'disabled':''}>🎯 Fit box amounts to goal</button>
       <p class="empty-note" style="text-align:left;padding:4px 0 0;">Re-spreads the empty boxes so everything adds up to exactly the goal. Saved and pending boxes keep their amount.</p>
 
+      <label style="margin-top:16px;">💵 Peso bills (₱10, 20, 50, 100…)</label>
+      <input id="sBills" type="text" value="10, 20, 50, 100, 200, 1000" inputmode="text">
+      <button class="btn btn-primary" id="assignBillsBtn" style="margin-top:8px;" ${meta.locked?'disabled':''}>💵 Give empty boxes these bills</button>
+      <p class="empty-note" style="text-align:left;padding:4px 0 0;">Mixes the bills across the empty boxes so everything adds up to exactly the ${peso(meta.goal)} goal. Saved and pending boxes keep their amount.</p>
+
       <label style="margin-top:16px;">🎲 Randomize amounts (different amount per box)</label>
       <div style="display:flex;gap:8px;">
         <input id="sRandMin" type="number" placeholder="Min ₱" value="10" style="flex:1;">
@@ -1872,6 +1945,10 @@ function openSettings(){
     document.getElementById('fitGoalBtn').onclick = async () => {
       if (state.meta.locked){ toast('Unlock first'); return; }
       if (await fitAmountsToGoal()) backdrop.remove();
+    };
+    document.getElementById('assignBillsBtn').onclick = async () => {
+      if (state.meta.locked){ toast('Unlock first'); return; }
+      if (await assignBills(document.getElementById('sBills').value)) backdrop.remove();
     };
     document.getElementById('shuffleAmountsBtn').onclick = async () => {
       if (state.meta.locked){ toast('Unlock first'); return; }
