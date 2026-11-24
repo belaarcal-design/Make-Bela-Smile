@@ -952,7 +952,7 @@ async function shuffleBoxAmounts(min, max){
   const ok = await sset(keyBoxes(state.code), boxes, true);
   if (!ok){ toast('⚠️ Could not save — try again'); return; }
   state.boxes = boxes;
-  toast(`Shuffled amounts for ${changed} box(es) (₱${min}–₱${max})`);
+  toast(`Shuffled ${changed} box(es). Boxes now total ${peso(boxesTotal())} (goal ${peso(state.meta.goal)})`);
   render();
 }
 async function setMilestonePhoto(slot, file){
@@ -1168,6 +1168,31 @@ function openBehalfModal(indexes){
     backdrop.remove();
     pickPhoto(file => uploadReceipt(indexes, file, who));   // runs inside this tap, so the picker is allowed to open
   };
+}
+
+function boxesTotal(){
+  return (state.boxes||[]).reduce((s,b)=>s+Number(b.amount||0),0);
+}
+
+// Re-spreads the amounts of the still-empty boxes so ALL boxes add up to exactly the goal.
+async function fitAmountsToGoal(){
+  if (!state.me.isAdmin){ toast('Only admins can change box amounts'); return false; }
+  const boxes = await sget(keyBoxes(state.code), true) || state.boxes;
+  const goal = Number(state.meta.goal||0);
+  const empties = boxes.map((b,i)=>i).filter(i => boxes[i].status === 'empty');
+  const taken = boxes.reduce((s,b)=> s + (b.status === 'empty' ? 0 : Number(b.amount||0)), 0);
+  const remaining = goal - taken;
+  if (!empties.length){ toast('No empty boxes left to adjust.'); return false; }
+  if (remaining < empties.length){ toast('Goal is already covered by saved/pending boxes — raise the goal or add boxes.'); return false; }
+  const base = Math.floor(remaining / empties.length);
+  let extra = remaining - base * empties.length;
+  empties.forEach(i => { boxes[i].amount = base + (extra > 0 ? 1 : 0); if (extra > 0) extra--; });
+  const ok = await sset(keyBoxes(state.code), boxes, true);
+  if (!ok){ toast('⚠️ Could not save — try again'); return false; }
+  state.boxes = boxes;
+  toast('Boxes now add up to ' + peso(boxesTotal()));
+  render();
+  return true;
 }
 
 /* ================= derived data ================= */
@@ -1509,6 +1534,11 @@ function renderChallenge(){
   <div class="section-card">
     <div class="section-title">Envelope grid</div>
     <p class="grid-hint">${state.meta.status === 'ended' ? 'This challenge has ended. New receipts are closed, but admins can still manage settings and boxes.' : state.selectMode ? 'Tap open boxes to select them, then upload one receipt to cover all of them.' : (state.me.isAdmin ? 'Tap an open box to upload a receipt — you can choose which team member it’s for.' : 'Tap an open box, upload your receipt, and wait for admin approval.')}</p>
+    ${state.me.isAdmin && state.meta.status !== 'ended' && boxesTotal() < Number(state.meta.goal||0) ? `
+    <div class="select-bar" style="margin:0 0 10px;flex-direction:column;align-items:flex-start;">
+      <span>⚠️ Boxes only add up to ${peso(boxesTotal())} — ${peso(Number(state.meta.goal||0) - boxesTotal())} short of the ${peso(state.meta.goal)} goal, so it can’t be reached.</span>
+      <span style="font-weight:400;">Open ⚙️ Settings → “Fit box amounts to goal”.</span>
+    </div>` : ''}
     <div class="env-grid">${gridCells}</div>
     ${state.selectMode ? `
     <div class="select-bar">
@@ -1759,6 +1789,11 @@ function openSettings(){
       <input id="sNumBoxes" type="number" value="${meta.numBoxes}">
       <button class="btn btn-primary" id="saveSettingsBtn" ${meta.locked?'disabled':''}>Save changes</button>
 
+      <label style="margin-top:16px;">🎯 Boxes vs goal</label>
+      <p class="hint" style="color:${boxesTotal() < Number(meta.goal||0) ? '#c0392b' : 'var(--green)'};font-weight:700;">Boxes add up to ${peso(boxesTotal())} of ${peso(meta.goal)} goal${boxesTotal() < Number(meta.goal||0) ? ' — short' : ''}</p>
+      <button class="btn btn-primary" id="fitGoalBtn" style="margin-top:6px;" ${meta.locked?'disabled':''}>🎯 Fit box amounts to goal</button>
+      <p class="empty-note" style="text-align:left;padding:4px 0 0;">Re-spreads the empty boxes so everything adds up to exactly the goal. Saved and pending boxes keep their amount.</p>
+
       <label style="margin-top:16px;">🎲 Randomize amounts (different amount per box)</label>
       <div style="display:flex;gap:8px;">
         <input id="sRandMin" type="number" placeholder="Min ₱" value="10" style="flex:1;">
@@ -1833,6 +1868,10 @@ function openSettings(){
         numBoxes: Number(document.getElementById('sNumBoxes').value) || state.meta.numBoxes,
       });
       backdrop.remove();
+    };
+    document.getElementById('fitGoalBtn').onclick = async () => {
+      if (state.meta.locked){ toast('Unlock first'); return; }
+      if (await fitAmountsToGoal()) backdrop.remove();
     };
     document.getElementById('shuffleAmountsBtn').onclick = async () => {
       if (state.meta.locked){ toast('Unlock first'); return; }
